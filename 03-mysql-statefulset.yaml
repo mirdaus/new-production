@@ -1,0 +1,1538 @@
+Skip to content
+DEV Community
+Find related posts...
+Powered by Algolia 
+Create Post
+5
+
+
+0
+Jump to Comments
+
+0
+Save
+
+Boost
+
+Aisalkyn Aidarova
+Aisalkyn Aidarova
+Posted on Oct 1
+
+JumpToTech — LIVE Production Troubleshooting Lab
+#
+devops
+#
+infrastructure
+#
+kubernetes
+#
+sre
+JumpToTech — LIVE Production Troubleshooting Lab
+StatefulSet + PVC + Service + DNS + Failures + Argo CD
+Duration: 3 hours
+
+Rule for today:
+
+Do NOT immediately delete the Pod.
+
+For every incident:
+
+OBSERVE → DESCRIBE → LOGS → EVENTS → DEPENDENCIES → FIX → VERIFY
+PART 1 — CREATE THE LAB
+Step 1 — Create the folder
+mkdir stateful-production-lab
+cd stateful-production-lab
+
+mkdir k8s
+cd k8s
+Check:
+
+pwd
+Step 2 — Namespace
+Create:
+
+touch 00-namespace.yaml
+Open it:
+
+code 00-namespace.yaml
+Add:
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+Step 3 — Secret
+Create:
+
+touch 01-secret.yaml
+Add:
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: production
+type: Opaque
+stringData:
+  MYSQL_ROOT_PASSWORD: jumptotech123
+  MYSQL_DATABASE: restaurant
+  MYSQL_USER: appuser
+  MYSQL_PASSWORD: apppassword
+This is a classroom Secret.
+
+Do not use plaintext production passwords in Git like this in a real environment.
+
+Step 4 — Headless Service
+Create:
+
+touch 02-mysql-headless.yaml
+Add:
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-headless
+  namespace: production
+spec:
+  clusterIP: None
+
+  selector:
+    app: mysql
+
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+Explain:
+
+mysql-0.mysql-headless.production.svc.cluster.local
+StatefulSet uses stable Pod identity.
+
+Step 5 — StatefulSet
+Create:
+
+touch 03-mysql-statefulset.yaml
+Add:
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: production
+
+spec:
+  serviceName: mysql-headless
+
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: mysql
+
+  template:
+    metadata:
+      labels:
+        app: mysql
+
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: mysql
+          image: mysql:8.0
+
+          ports:
+            - name: mysql
+              containerPort: 3306
+
+          envFrom:
+            - secretRef:
+                name: mysql-secret
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+
+  volumeClaimTemplates:
+    - metadata:
+        name: mysql-data
+
+      spec:
+        accessModes:
+          - ReadWriteOnce
+
+        resources:
+          requests:
+            storage: 2Gi
+Step 6 — Apply
+Return to the project root:
+
+cd ..
+Apply:
+
+kubectl apply -f k8s/
+Check:
+
+kubectl get pods -n production
+Wait until:
+
+NAME      READY   STATUS
+mysql-0   1/1     Running
+Check StatefulSet:
+
+kubectl get sts -n production
+Check PVC:
+
+kubectl get pvc -n production
+Check PV:
+
+kubectl get pv
+Check Service:
+
+kubectl get svc -n production
+STOP HERE AND EXPLAIN
+Ask students:
+
+What did Kubernetes create?
+
+Draw:
+
+StatefulSet
+     |
+     v
+ mysql-0
+     |
+     v
+mysql-data-mysql-0
+     |
+     v
+    PV
+     |
+     v
+Persistent Storage
+Now:
+
+kubectl get pod mysql-0 \
+  -n production \
+  -o jsonpath='{.metadata.name}'
+Output:
+
+mysql-0
+Stable identity.
+
+PART 2 — PROVE THAT DATA SURVIVES
+Step 7 — Create actual data
+Enter MySQL:
+
+kubectl exec -it mysql-0 \
+  -n production \
+  -- mysql -u root -pjumptotech123
+Run:
+
+USE restaurant;
+Create table:
+
+CREATE TABLE customers (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100),
+    email VARCHAR(100)
+);
+Insert data:
+
+INSERT INTO customers (name, email)
+VALUES
+('Emma', 'emma@jumptotech.com');
+Check:
+
+SELECT * FROM customers;
+Expected:
+
++----+-------+----------------------+
+| id | name  | email                |
++----+-------+----------------------+
+|  1 | Emma  | emma@jumptotech.com |
++----+-------+----------------------+
+Exit:
+
+exit;
+Step 8 — Delete the Pod
+Now deliberately delete the database Pod:
+
+kubectl delete pod mysql-0 -n production
+Immediately:
+
+kubectl get pods -n production -w
+StatefulSet creates:
+
+mysql-0
+again.
+
+Wait until:
+
+mysql-0   1/1   Running
+Step 9 — Did we lose the database?
+Connect again:
+
+kubectl exec -it mysql-0 \
+  -n production \
+  -- mysql -u root -pjumptotech123
+Run:
+
+USE restaurant;
+
+SELECT * FROM customers;
+The data should still exist.
+
+Explain:
+
+POD DELETED
+    X
+
+PVC NOT DELETED
+    ✓
+
+PV NOT DELETED
+    ✓
+
+DATA NOT DELETED
+    ✓
+
+
+New mysql-0
+     |
+     v
+same PVC
+     |
+     v
+persistent data
+This is the foundation of today's incidents.
+
+INCIDENT 1 — CLIENT CANNOT CONNECT TO DATABASE
+Time: approximately 35 minutes into class
+Tell students only:
+
+Production alert:
+
+Application cannot connect to database.
+
+Find the problem.
+
+Do NOT tell them what is broken.
+
+First:
+
+kubectl get pods -n production
+Output:
+
+mysql-0   1/1   Running
+Ask:
+
+Is production healthy just because the Pod is Running?
+
+No.
+
+Check Service:
+
+kubectl get svc -n production
+Check endpoints:
+
+kubectl get endpoints -n production
+Check EndpointSlices:
+
+kubectl get endpointslices -n production
+Now create a troubleshooting Pod:
+
+kubectl run troubleshoot \
+  --image=busybox:1.36 \
+  --restart=Never \
+  -n production \
+  -- sleep 3600
+Wait:
+
+kubectl get pod troubleshoot -n production
+Test DNS
+kubectl exec troubleshoot \
+  -n production \
+  -- nslookup mysql-headless
+Then:
+
+kubectl exec troubleshoot \
+  -n production \
+  -- nslookup mysql-headless.production.svc.cluster.local
+If DNS works, say:
+
+Stop.
+
+We just proved Kubernetes DNS can resolve the Service.
+
+Therefore, don't continue saying “maybe DNS.”
+
+Move to the next layer.
+
+Test the Port
+BusyBox commonly provides nc.
+
+Run:
+
+kubectl exec troubleshoot \
+  -n production \
+  -- nc -zv mysql-headless 3306
+We want connectivity to:
+
+mysql-headless:3306
+Architecture:
+
+Troubleshooting Pod
+        |
+        | DNS
+        v
+mysql-headless
+        |
+        | TCP 3306
+        v
+     mysql-0
+NOW BREAK IT
+Open:
+
+code k8s/02-mysql-headless.yaml
+Change:
+
+selector:
+  app: mysql
+to:
+
+selector:
+  app: mysql-broken
+Apply:
+
+kubectl apply -f k8s/02-mysql-headless.yaml
+Check Pods:
+
+kubectl get pods -n production
+Still:
+
+mysql-0   1/1   Running
+Now:
+
+kubectl get endpoints mysql-headless -n production
+Students should notice the Service no longer has the expected backend.
+
+Check labels:
+
+kubectl get pods \
+  -n production \
+  --show-labels
+Compare:
+
+SERVICE SELECTOR
+
+app=mysql-broken
+
+
+POD LABEL
+
+app=mysql
+Root cause:
+
+Service
+   |
+   X
+Endpoint
+   |
+   X
+mysql-0
+FIX INCIDENT 1
+Change back:
+
+selector:
+  app: mysql
+Apply:
+
+kubectl apply -f k8s/02-mysql-headless.yaml
+Verify:
+
+kubectl get endpoints mysql-headless -n production
+Test again:
+
+kubectl exec troubleshoot \
+  -n production \
+  -- nc -zv mysql-headless 3306
+Lesson:
+
+Pod Running ≠ Application Reachable
+INCIDENT 2 — WRONG PORT
+Tell students:
+
+New incident.
+
+Database Pod is healthy.
+
+DNS resolves.
+
+Application still cannot connect.
+
+Break Service.
+
+Change:
+
+targetPort: 3306
+to:
+
+targetPort: 3307
+Apply:
+
+kubectl apply -f k8s/02-mysql-headless.yaml
+Now:
+
+kubectl get pods -n production
+Healthy.
+
+DNS:
+
+kubectl exec troubleshoot \
+  -n production \
+  -- nslookup mysql-headless
+DNS works.
+
+Now connectivity:
+
+kubectl exec troubleshoot \
+  -n production \
+  -- nc -zv mysql-headless 3306
+It should fail to reach the actual MySQL listener through the misconfigured Service path.
+
+Ask:
+
+DNS works. Pod works. What is between them?
+
+Answer:
+
+SERVICE
+Inspect:
+
+kubectl describe svc mysql-headless -n production
+Look at:
+
+Port:        3306
+TargetPort:  3307
+But MySQL listens on:
+
+3306
+Therefore:
+
+Application
+     |
+     | 3306
+     v
+Service
+     |
+     | WRONG → 3307
+     X
+MySQL
+     |
+     | listening 3306
+FIX INCIDENT 2
+Restore:
+
+targetPort: 3306
+Apply:
+
+kubectl apply -f k8s/02-mysql-headless.yaml
+Verify:
+
+kubectl exec troubleshoot \
+  -n production \
+  -- nc -zv mysql-headless 3306
+INCIDENT 3 — DATABASE POD RUNNING BUT NOT READY
+Tell students:
+
+Monitoring says database Pod exists, but it is not Ready.
+
+Break readiness probe.
+
+Open:
+
+code k8s/03-mysql-statefulset.yaml
+Find:
+
+readinessProbe:
+Change its command to intentionally use the wrong port:
+
+readinessProbe:
+  exec:
+    command:
+      - sh
+      - -c
+      - mysqladmin ping -h 127.0.0.1 -P 3307 -uroot -p"$MYSQL_ROOT_PASSWORD"
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  timeoutSeconds: 5
+Apply:
+
+kubectl apply -f k8s/03-mysql-statefulset.yaml
+Watch:
+
+kubectl get pods -n production -w
+You may see:
+
+mysql-0   0/1   Running
+Ask:
+
+Is the container Running?
+
+Yes.
+
+Is Kubernetes considering it Ready?
+
+No.
+
+Investigate:
+
+kubectl describe pod mysql-0 -n production
+Go to:
+
+Events:
+Then:
+
+kubectl get events \
+  -n production \
+  --sort-by=.lastTimestamp
+Check logs too:
+
+kubectl logs mysql-0 -n production
+Explain:
+
+STATUS
+Running
+
+READY
+0/1
+means:
+
+PROCESS EXISTS
+
+but
+
+POD IS NOT READY FOR NORMAL SERVICE TRAFFIC
+FIX INCIDENT 3
+Restore:
+
+readinessProbe:
+  exec:
+    command:
+      - sh
+      - -c
+      - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+Apply:
+
+kubectl apply -f k8s/03-mysql-statefulset.yaml
+Watch:
+
+kubectl get pods -n production -w
+Wait for:
+
+mysql-0   1/1   Running
+INCIDENT 4 — IMAGEPULLBACKOFF
+Tell students:
+
+Developer released a new database version.
+
+Production deployment started failing.
+
+Break:
+
+image: mysql:8.0
+Change to:
+
+image: mysql:jumptotech-does-not-exist
+Apply:
+
+kubectl apply -f k8s/03-mysql-statefulset.yaml
+Watch:
+
+kubectl get pods -n production -w
+Possible:
+
+ErrImagePull
+
+ImagePullBackOff
+Ask students:
+
+What is your first investigation command?
+
+Use:
+
+kubectl describe pod mysql-0 -n production
+Look at Events.
+
+Then:
+
+kubectl get events \
+  -n production \
+  --sort-by=.lastTimestamp
+Root cause:
+
+Requested image/tag doesn't exist.
+Possible real causes:
+
+wrong repository
+wrong tag
+private registry authentication
+imagePullSecret
+registry/network issue
+FIX INCIDENT 4
+Restore:
+
+image: mysql:8.0
+Apply:
+
+kubectl apply -f k8s/03-mysql-statefulset.yaml
+Watch recovery:
+
+kubectl get pods -n production -w
+Then verify the data again:
+
+kubectl exec -it mysql-0 \
+  -n production \
+  -- mysql -u root -pjumptotech123
+USE restaurant;
+
+SELECT * FROM customers;
+Your data should still exist.
+
+10-MINUTE BREAK
+At this point students have diagnosed:
+
+✓ DNS
+
+✓ Service selector
+
+✓ Endpoints
+
+✓ Wrong port
+
+✓ Readiness
+
+✓ ImagePullBackOff
+
+✓ Stateful persistence
+Now move specifically into storage.
+
+INCIDENT 5 — STORAGE TROUBLESHOOTING
+Start healthy:
+
+kubectl get pvc -n production
+Expected:
+
+mysql-data-mysql-0   Bound
+Ask:
+
+If the Pod becomes Pending or ContainerCreating because of storage, where do we look?
+
+First:
+
+kubectl describe pod mysql-0 -n production
+Then:
+
+kubectl get pvc -n production
+Then:
+
+kubectl describe pvc mysql-data-mysql-0 \
+  -n production
+Then:
+
+kubectl get pv
+Then:
+
+kubectl get sc
+Then Events:
+
+kubectl get events \
+  -n production \
+  --sort-by=.lastTimestamp
+Teach the dependency chain:
+
+POD
+ |
+ v
+PVC
+ |
+ v
+STORAGE CLASS
+ |
+ v
+CSI / PROVISIONER
+ |
+ v
+PV
+ |
+ v
+ACTUAL STORAGE
+Do not delete the working PVC just to manufacture a failure, because it contains the database created earlier.
+
+Instead create a safe broken claim.
+
+Create:
+
+cat > k8s/04-broken-pvc.yaml <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: broken-storage
+  namespace: production
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: storage-class-does-not-exist
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+Apply:
+
+kubectl apply -f k8s/04-broken-pvc.yaml
+Check:
+
+kubectl get pvc -n production
+Students should see:
+
+broken-storage   Pending
+Now ask:
+
+Don't tell me the answer. Show me how you find it.
+
+Run:
+
+kubectl describe pvc broken-storage -n production
+Then:
+
+kubectl get sc
+Students discover:
+
+storage-class-does-not-exist
+is invalid.
+
+Delete only the training PVC:
+
+kubectl delete pvc broken-storage -n production
+Delete the lab file:
+
+rm k8s/04-broken-pvc.yaml
+Important:
+
+WE DID NOT TOUCH:
+
+mysql-data-mysql-0
+INCIDENT 6 — CRASHLOOPBACKOFF
+Now create a separate failure so the database stays safe.
+
+Create:
+
+cat > k8s/05-crash.yaml <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: broken-application
+  namespace: production
+spec:
+  containers:
+    - name: application
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "Starting JumpToTech application..."
+          sleep 3
+          echo "ERROR: Database configuration invalid"
+          exit 1
+EOF
+Apply:
+
+kubectl apply -f k8s/05-crash.yaml
+Watch:
+
+kubectl get pod broken-application \
+  -n production \
+  -w
+Eventually:
+
+CrashLoopBackOff
+Now ask:
+
+What do you do?
+
+Logs:
+
+kubectl logs broken-application -n production
+Then the very important command:
+
+kubectl logs broken-application \
+  -n production \
+  --previous
+Then:
+
+kubectl describe pod broken-application \
+  -n production
+Explain:
+
+APPLICATION STARTS
+       |
+       v
+APPLICATION FAILS
+       |
+       v
+CONTAINER EXITS
+       |
+       v
+KUBERNETES RESTARTS
+       |
+       v
+FAILS AGAIN
+       |
+       v
+CrashLoopBackOff
+Clean up:
+
+kubectl delete -f k8s/05-crash.yaml
+rm k8s/05-crash.yaml
+PART 3 — ARGO CD
+Now tell students:
+
+Up to now we intentionally changed the cluster ourselves.
+
+In a GitOps production environment, we want Git to define desired state.
+
+Argo CD's automated sync can reconcile Git changes, and selfHeal: true can reconcile supported live-state drift back toward the desired state in Git. :chatgpt-content-reference{index="1"}
+
+First make sure the healthy manifests are restored.
+
+Check:
+
+kubectl get pods -n production
+kubectl get svc -n production
+kubectl get endpoints -n production
+kubectl get pvc -n production
+We want healthy state.
+
+Create Git Repository
+From project root:
+
+git init
+git branch -M main
+
+git add .
+git commit -m "add production stateful application"
+Create an empty GitHub repository for the lab.
+
+Then:
+
+git remote add origin <YOUR-REPOSITORY-URL>
+
+git push -u origin main
+Create Argo CD Application
+Create:
+
+mkdir -p argocd
+Then:
+
+cat > argocd/application.yaml <<'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: stateful-production
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: YOUR_REPOSITORY_URL
+    targetRevision: main
+    path: k8s
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+    syncOptions:
+      - CreateNamespace=true
+EOF
+Replace:
+
+YOUR_REPOSITORY_URL
+with your repository.
+
+Commit:
+
+git add .
+git commit -m "add Argo CD application"
+git push
+Bootstrap:
+
+kubectl apply -f argocd/application.yaml
+Check:
+
+kubectl get applications -n argocd
+Argo CD's Application spec supports automated sync, pruning, and self-healing in this configuration. :chatgpt-content-reference{index="2"}
+
+INCIDENT 7 — ARGO CD DRIFT
+Now the class becomes very interesting.
+
+Git says:
+
+replicas: 1
+Check:
+
+grep -n "replicas" \
+  k8s/03-mysql-statefulset.yaml
+Now somebody manually changes production:
+
+kubectl scale sts mysql \
+  --replicas=2 \
+  -n production
+Immediately:
+
+kubectl get sts mysql -n production
+You may briefly see:
+
+DESIRED: 2
+But Git says:
+
+1
+Ask:
+
+Who owns desired state?
+
+GIT
+Watch:
+
+kubectl get sts mysql \
+  -n production \
+  -w
+With self-healing enabled, Argo CD should reconcile the managed StatefulSet back toward the Git-defined state. :chatgpt-content-reference{index="3"}
+
+Explain:
+
+              GIT
+          replicas: 1
+               |
+               v
+            Argo CD
+               |
+          compare state
+               |
+               v
+          Kubernetes
+          replicas: 2
+               |
+               v
+
+             DRIFT
+
+               |
+               v
+         RECONCILIATION
+
+               |
+               v
+          replicas: 1
+INCIDENT 8 — BAD PRODUCTION DEPLOYMENT THROUGH GIT
+This is the FINAL incident.
+
+Tell students:
+
+It is 2:00 PM.
+
+Production is working.
+
+Developer pushes a change.
+
+Argo CD deploys it.
+
+Five minutes later users report an outage.
+
+You are on call.
+
+Now deliberately introduce the bad image through Git.
+
+Change:
+
+image: mysql:8.0
+to:
+
+image: mysql:broken-production-release
+Do NOT run:
+
+kubectl apply
+Instead:
+
+git add .
+git commit -m "release database v2"
+git push
+Now Argo CD sees Git change and syncs according to its automated-sync configuration. :chatgpt-content-reference{index="4"}
+
+Watch:
+
+kubectl get pods -n production -w
+Production begins failing.
+
+STUDENTS TROUBLESHOOT WITHOUT HELP
+Give them 5–10 minutes.
+
+Their process should be:
+
+kubectl get pods -n production
+Then:
+
+kubectl describe pod mysql-0 -n production
+Then:
+
+kubectl get events \
+  -n production \
+  --sort-by=.lastTimestamp
+Then ask:
+
+What changed?
+
+Check:
+
+git log --oneline -5
+Now they should connect:
+
+HEALTHY PRODUCTION
+       |
+       v
+NEW GIT COMMIT
+       |
+       v
+ARGO CD SYNC
+       |
+       v
+BAD IMAGE
+       |
+       v
+ImagePullBackOff
+       |
+       v
+DATABASE UNAVAILABLE
+       |
+       v
+PRODUCTION INCIDENT
+PRODUCTION RECOVERY
+Don't fix production manually with:
+
+kubectl set image...
+because Git would still contain the bad desired state.
+
+For today's simple lab, restore the known-good image in the manifest:
+
+image: mysql:8.0
+Then:
+
+git add .
+git commit -m "fix: restore known-good mysql image"
+git push
+Watch:
+
+kubectl get pods -n production -w
+Wait:
+
+mysql-0   1/1   Running
+Now verify DATA, not just Pod status:
+
+kubectl exec -it mysql-0 \
+  -n production \
+  -- mysql -u root -pjumptotech123
+Run:
+
+USE restaurant;
+
+SELECT * FROM customers;
+We should still have:
+
+Emma
+That is your production verification.
+
+FINAL INCIDENT REVIEW
+Ask students:
+
+Incident 1
+Pod = Running
+Client cannot connect
+Root cause:
+
+Service selector mismatch
+How did we find it?
+
+Service → Endpoints → Labels
+Incident 2
+DNS works
+Connection doesn't work
+Root cause:
+
+Wrong targetPort
+How did we find it?
+
+DNS test
+     ↓
+Port test
+     ↓
+Service inspection
+Incident 3
+mysql-0
+
+STATUS = Running
+READY = 0/1
+Root cause:
+
+Readiness probe
+Incident 4
+ImagePullBackOff
+Root cause:
+
+Invalid image
+Primary evidence:
+
+kubectl describe pod
+Events
+Incident 5
+PVC = Pending
+Root cause in our exercise:
+
+Invalid StorageClass
+Investigation:
+
+PVC
+ ↓
+describe PVC
+ ↓
+StorageClass
+ ↓
+Events
+Incident 6
+CrashLoopBackOff
+Investigation:
+
+logs
+logs --previous
+describe
+events
+Incident 7
+Git = 1 replica
+
+Cluster = 2 replicas
+Problem:
+
+Configuration Drift
+Argo CD:
+
+reconciles desired state
+Incident 8
+Production was working
+
+Git change
+
+Argo CD sync
+
+Production down
+Investigation:
+
+What changed?
+    ↓
+Pods
+    ↓
+Describe
+    ↓
+Events
+    ↓
+Git history
+    ↓
+Root cause
+    ↓
+Restore known-good desired state
+    ↓
+Verify application AND data
+FINAL INTERVIEW QUESTION
+Your interviewer says:
+
+“Our stateful production application suddenly became unavailable. How would you troubleshoot it?”
+
+Answer:
+
+“First I would clarify the scope of the incident and determine what changed around the time of failure. I would check the workload state and then use describe, logs and events to collect evidence. I would verify the application's dependencies, including Services, endpoints, DNS, ports, StatefulSet replicas, PVC/PV status and storage. If the environment uses GitOps, I would also compare the Git desired state with the live cluster and review the latest Argo CD synchronization. After identifying the root cause, I would apply or revert the appropriate change through the normal deployment process and verify both service availability and data integrity.”
+
+Commands Students Should Know After This Lab
+kubectl get pods -n production -o wide
+
+kubectl describe pod <pod> -n production
+
+kubectl logs <pod> -n production
+
+kubectl logs <pod> -n production --previous
+
+kubectl get events \
+  -n production \
+  --sort-by=.lastTimestamp
+
+kubectl get sts -n production
+
+kubectl get svc -n production
+
+kubectl describe svc <service> -n production
+
+kubectl get endpoints -n production
+
+kubectl get endpointslices -n production
+
+kubectl get pods -n production --show-labels
+
+kubectl get pvc -n production
+
+kubectl describe pvc <pvc> -n production
+
+kubectl get pv
+
+kubectl get sc
+The Rule to Remember
+                 PRODUCTION DOWN
+                        |
+                        v
+                  WHAT CHANGED?
+                        |
+                        v
+                       GET
+                        |
+                        v
+                    DESCRIBE
+                        |
+                        v
+                      LOGS
+                        |
+                        v
+                     EVENTS
+                        |
+                        v
+                  DEPENDENCIES
+                        |
+        +---------------+---------------+
+        |               |               |
+        v               v               v
+     NETWORK          STORAGE          CONFIG
+        |               |               |
+     Service           PVC           Secret
+     Endpoint           PV            ConfigMap
+     DNS                SC
+     Port               CSI
+        |               |
+        +-------+-------+
+                |
+                v
+            ROOT CAUSE
+                |
+                v
+               FIX
+                |
+                v
+             VERIFY
+Do not restart first. Investigate first.
+
+How I would run the three hours
+First 30–40 minutes: build the MySQL StatefulSet, create real database data, delete mysql-0, and prove persistence.
+
+Next 60 minutes: Service selector → endpoints → DNS → wrong targetPort → readiness → ImagePullBackOff. Make the students tell you which command to run before you run it.
+
+10-minute break.
+
+Next 35–40 minutes: PVC Pending + CrashLoopBackOff + storage troubleshooting.
+
+Final 30–40 minutes: turn on Argo CD ownership, demonstrate drift, then finish with the bad Git release causing a production outage. Make the students diagnose and recover it themselves.
+
+One important production distinction to say during class: a StatefulSet gives each Pod stable identity and can associate it with stable storage, but that alone does not give MySQL database replication or high availability. This lab deliberately uses one MySQL replica so students don't leave believing that replicas: 3 automatically creates a valid MySQL HA cluster. Kubernetes documents StatefulSet's stable network/storage identity behavior explicitly. :chatgpt-content-reference{index="5"}
+
+Top comments (0)
+
+Subscribe
+pic
+Add to the discussion
+
+Submit
+Preview
+Code of Conduct • Report abuse
+profile
+The DEV Team
+Promoted
+
+Hacktoberfest image
+
+Find a Fest near you 📍🎃
+Hacktoberfest is back. 300+ in person Fests and online events worldwide this October, all about building with open-source AI.
+
+Every Fest is a one-day, in-person event, either a Hack Day or a Meetup, hosted by local organizers. Search by name or city, or use your location to see what is closest.
+
+Find a Fest →
+
+
+Aisalkyn Aidarova
+Follow
+JumpToTech | DevOps + AI 🚀 С нуля до работы в IT 7 месяцев • реальные проекты AWS • Terraform • Kubernetes Помощь с резюме + интервью 👇 Стартуй здесь
+Location
+Chicago
+Joined
+Oct 6, 2025
+More from Aisalkyn Aidarova
+JumpToTech DevOps — Production Troubleshooting Lab
+#debugging #devops #kubernetes #sre
+statefulset prod lab
+#architecture #devops #kubernetes #tutorial
+DevOps / SRE Interview Master Guide
+#career #devops #interview #sre
+profile
+The DEV Team
+Promoted
+
+Global Hack Week: Open Source
+
+Join us for a week of all things open weight models, in partnership with Hacktoberfest!
+Global Hack Week: Open Source has daily challenges, live streams, and a Discord full of builders. Beginners welcome.
+
+Register Free
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: production
+
+spec:
+  serviceName: mysql-headless
+
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: mysql
+
+  template:
+    metadata:
+      labels:
+        app: mysql
+
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: mysql
+          image: mysql:8.0
+
+          ports:
+            - name: mysql
+              containerPort: 3306
+
+          envFrom:
+            - secretRef:
+                name: mysql-secret
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+
+  volumeClaimTemplates:
+    - metadata:
+        name: mysql-data
+
+      spec:
+        accessModes:
+          - ReadWriteOnce
+
+        resources:
+          requests:
+            storage: 2Gi
+DEV Community — A space to discuss and keep up software development and manage your software career
+
+Home
+DEV Challenges
+DEV++
+Videos
+DEV Education Tracks
+DEV Help
+Advertise on DEV
+Organization Accounts
+DEV Showcase
+About
+Contact
+Free Postgres Database
+DEV Shop
+MLH
+Code of Conduct
+Privacy Policy
+Terms of Use
+Built on Forem — the open source software that powers DEV and other inclusive communities.
+
+Made with love and Ruby on Rails. DEV Community © 2016 - 2026.
